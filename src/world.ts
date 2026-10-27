@@ -134,8 +134,6 @@ export class QzoneWatcherWorld implements World {
       config: [QZONE_WATCHER_CONFIG_GROUP],
     };
   }
-    };
-  }
 
   async start(host: WorldHost): Promise<void> {
     this.host = host;
