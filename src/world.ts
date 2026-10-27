@@ -256,7 +256,7 @@ export class QzoneWatcherWorld implements World {
         try {
           const comments = await this.poller.getComments(feed.tid, feed.uin);
           for (const c of comments) {
-            if (this.isNewComment(c.commentId)) {
+            if (this.isNewComment(c.commentId, feed.tid)) {
               newComments.push({
                 ...c,
                 feedTid: feed.tid,
@@ -296,8 +296,10 @@ export class QzoneWatcherWorld implements World {
 
   // ── 推送 ──────────────────────────────────────────────────────────────
 
-  private isNewComment(commentId: string): boolean {
-    return !this.state.seenComments.includes(commentId);
+  private isNewComment(commentId: string, tid: string): boolean {
+    // 用 tid:commentId 作为去重 key，因为不同动态下的 comment_id 可能重复（都是简单数字）
+    const key = `${tid}:${commentId}`;
+    return !this.state.seenComments.includes(key);
   }
 
   private canNotify(): boolean {
@@ -316,7 +318,7 @@ export class QzoneWatcherWorld implements World {
     if (!this.host) return;
     this.state.lastNotifyAt = Date.now();
     this.state.dailyCount += 1;
-    this.markSeen(c.commentId);
+    this.markSeen(c.commentId, c.feedTid);
     this.saveState();
 
     // 推事件给主模型。origin=external：评论来自任意评论者，是不可信外部内容。
@@ -400,9 +402,10 @@ export class QzoneWatcherWorld implements World {
     }
   }
 
-  private markSeen(commentId: string): void {
-    if (!this.state.seenComments.includes(commentId)) {
-      this.state.seenComments.push(commentId);
+  private markSeen(commentId: string, tid: string): void {
+    const key = `${tid}:${commentId}`;
+    if (!this.state.seenComments.includes(key)) {
+      this.state.seenComments.push(key);
     }
   }
 }
