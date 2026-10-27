@@ -15,6 +15,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   Language,
+  StoragePart,
   ToolDef,
   World,
   WorldHost,
@@ -56,6 +57,10 @@ export class QzoneWatcherWorld implements World {
   private poller: QzonePoller | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  /** 是否已完成初始化扫描（第一次只标记 seen 不推送）。 */
+  private initialized = false;
+  /** bot 自己的 QQ 号，用于过滤自己的评论。 */
+  private botUin: string = '';
   /** 上次轮询时间戳（毫秒），用于控制台显示。 */
   private lastPollAt: number = 0;
   /** 上次轮询结果：'ok' | 'error' | null（还没跑过）。 */
@@ -107,17 +112,16 @@ export class QzoneWatcherWorld implements World {
       },
     ];
 
-    // 不定义自定义 panels——那些需要前端构建产物（dist/console.js）。
-    // 配置表单由 Cortico Core 根据 config ConfigGroup 自动生成，不需要构建产物。
-    // 运行状态通过 lamps + badges 展示。
+    // badges 只放静态配置值（webUi 调用时固定，不会动态刷新）。
+    // 动态数据通过 storage.stat() 实时展示（前端打开数据页时调用）。
     return {
       label: 'QQ空间评论监听',
       lamps,
       badges: [
-        { label: '今日推送', value: this.state.dailyCount, tone: 'on' },
-        { label: '已记录评论', value: this.state.seenComments.length, tone: 'plain' },
         { label: '轮询间隔', value: `${this.cfg.pollIntervalSec}秒`, tone: 'plain' },
         { label: '每次检查', value: `${this.cfg.feedsPerPoll}条动态`, tone: 'plain' },
+        { label: '每日上限', value: `${this.cfg.dailyNotifyLimit}条`, tone: 'plain' },
+        { label: '静默时段', value: `${this.cfg.quietFrom}:00-${this.cfg.quietTo}:00`, tone: 'plain' },
       ],
       promptDocs: [
         {
@@ -132,7 +136,39 @@ export class QzoneWatcherWorld implements World {
         },
       ],
       config: [QZONE_WATCHER_CONFIG_GROUP],
+      storage: [
+        {
+          key: 'qzone-watcher-state',
+          label: '监听状态数据',
+          kind: 'disk',
+          location: join(this.dataDir, 'qzone-watcher-state.json'),
+          note: '已通知过的评论 ID 列表和每日计数。清除后下次启动会重新初始化扫描。',
+          stat: () => this.storageStat(),
+          clear: async () => this.clearState(),
+        },
+      ],
     };
+  }
+
+  /** storage.stat() 的实现：返回实时运行状态。 */
+  private storageStat(): string {
+    const lastPoll = this.lastPollAt
+      ? new Date(this.lastPollAt).toLocaleString('zh-CN', { timeZone: this.timezone })
+      : '尚未轮询';
+    const lastResult = this.lastPollResult === 'ok'
+      ? '正常'
+      : this.lastPollResult === 'error'
+        ? `错误：${this.lastPollError}`
+        : '未轮询';
+    return `今日推送 ${this.state.dailyCount}/${this.cfg.dailyNotifyLimit}，已记录评论 ${this.state.seenComments.length} 条，上次轮询：${lastPoll}（${lastResult}）`;
+  }
+
+  /** storage.clear() 的实现：清空状态文件。 */
+  private async clearState(): Promise<string> {
+    this.state = { seenComments: [], day: '', dailyCount: 0, lastNotifyAt: 0 };
+    this.initialized = false;
+    this.saveState();
+    return '已清空监听状态。下次轮询将重新初始化扫描。';
   }
 
   async start(host: WorldHost): Promise<void> {
@@ -153,12 +189,21 @@ export class QzoneWatcherWorld implements World {
       log: host.log,
     });
 
+    // 获取 bot 自己的 QQ 号，用于过滤自己的评论
+    try {
+      const info = await this.poller.getLoginInfo();
+      this.botUin = info.uin;
+      host.log.info('bot identity', { uin: info.uin, nickname: info.nickname });
+    } catch (e) {
+      host.log.warn('获取 bot QQ 号失败，将无法过滤自己的评论', e);
+    }
+
     const sec = Math.max(60, this.cfg.pollIntervalSec);
     this.timer = setInterval(() => {
       this.poll().catch((e) => host.log.error('poll error', e));
     }, sec * 1000);
 
-    host.log.info('started', { pollIntervalSec: sec, httpUrl: this.cfg.httpUrl });
+    host.log.info('started', { pollIntervalSec: sec, httpUrl: this.cfg.httpUrl, botUin: this.botUin });
 
     // 启动后立即跑一次，不等第一个 interval
     this.poll().catch((e) => host.log.error('initial poll error', e));
@@ -189,21 +234,21 @@ export class QzoneWatcherWorld implements World {
         return;
       }
 
-      // 收集所有新评论
-      const newComments: NewComment[] = [];
+      // 收集所有评论
+      const allComments: NewComment[] = [];
       for (const feed of feeds) {
         try {
           const comments = await this.poller.getComments(feed.tid, feed.uin);
           for (const c of comments) {
-            if (this.isNewComment(c.commentId, feed.tid)) {
-              newComments.push({
-                ...c,
-                feedTid: feed.tid,
-                feedText: feed.text,
-                feedUin: feed.uin,
-                feedNickname: feed.nickname,
-              });
-            }
+            // 过滤 bot 自己的评论，避免无限循环
+            if (this.botUin && c.uin === this.botUin) continue;
+            allComments.push({
+              ...c,
+              feedTid: feed.tid,
+              feedText: feed.text,
+              feedUin: feed.uin,
+              feedNickname: feed.nickname,
+            });
           }
         } catch (e) {
           // 单条动态解析失败不影响其他
@@ -211,6 +256,21 @@ export class QzoneWatcherWorld implements World {
         }
       }
 
+      // 第一次启动（初始化扫描）：把所有已有评论标记为 seen，但不推送。
+      // 这样只有之后真正新来的评论才会触发通知。
+      if (!this.initialized) {
+        for (const c of allComments) {
+          this.markSeen(c.commentId, c.feedTid);
+        }
+        this.initialized = true;
+        this.saveState();
+        this.lastNewCount = 0;
+        this.host.log.info('initial scan done', { seenComments: this.state.seenComments.length });
+        return;
+      }
+
+      // 筛出未见过的新评论
+      const newComments = allComments.filter((c) => this.isNewComment(c.commentId, c.feedTid));
       this.lastNewCount = newComments.length;
 
       if (!newComments.length) return;

@@ -45,6 +45,16 @@ export interface PollerOptions {
 export class QzonePoller {
   constructor(private readonly opts: PollerOptions) {}
 
+  /** 获取 bot 自己的 QQ 号（用于过滤自己的评论）。 */
+  async getLoginInfo(): Promise<{ uin: string; nickname: string }> {
+    const raw = await this.callApi('get_login_info', {});
+    const d = (raw ?? {}) as { user_id?: number | string; nickname?: string };
+    return {
+      uin: String(d.user_id ?? ''),
+      nickname: String(d.nickname ?? ''),
+    };
+  }
+
   /** 调 SnowLuma HTTP API。 */
   private async callApi(action: string, params: Record<string, unknown>): Promise<unknown> {
     const url = `${this.opts.httpUrl.replace(/\/+$/, '')}/${action}`;
