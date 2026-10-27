@@ -275,14 +275,12 @@ export class QzoneWatcherWorld implements World {
 
       if (!newComments.length) return;
 
-      // 按时间排序，旧的先推
+      // 按时间排序，旧的在前
       newComments.sort((a, b) => a.time - b.time);
 
-      // 逐条推送（受冷却和每日上限约束）
-      for (const c of newComments) {
-        if (!this.canNotify()) break;
-        this.notifyComment(c);
-      }
+      // 合并推送：把所有新评论放进一条事件，主模型逐条回复
+      if (!this.canNotify()) return;
+      this.notifyComments(newComments);
     } catch (e) {
       this.lastPollAt = Date.now();
       this.lastPollResult = 'error';
@@ -313,33 +311,62 @@ export class QzoneWatcherWorld implements World {
     return true;
   }
 
-  private notifyComment(c: NewComment): void {
-    if (!this.host) return;
+  /** 合并推送多条新评论：一条事件带上所有评论，主模型逐条回复。 */
+  private notifyComments(comments: NewComment[]): void {
+    if (!this.host || !comments.length) return;
     this.state.lastNotifyAt = Date.now();
     this.state.dailyCount += 1;
-    this.markSeen(c.commentId, c.feedTid);
+
+    // 全部标记为 seen（不管主模型最终回不回，都不会再推第二次）
+    for (const c of comments) {
+      this.markSeen(c.commentId, c.feedTid);
+    }
     this.saveState();
 
-    // 推事件给主模型。origin=external：评论来自任意评论者，是不可信外部内容。
-    const feedPreview = c.feedText.slice(0, 80);
-    const text = `QQ空间评论：${c.name ? c.name + ' ' : ''}在你的动态下评论了「${c.content}」。动态内容：「${feedPreview}」。用 qq_qzone(action=reply) 回复。`;
+    // 构建事件正文：按动态分组列出所有新评论
+    const lines: string[] = [];
+    const byFeed = new Map<string, NewComment[]>();
+    for (const c of comments) {
+      const arr = byFeed.get(c.feedTid) ?? [];
+      arr.push(c);
+      byFeed.set(c.feedTid, arr);
+    }
+
+    for (const [tid, list] of byFeed) {
+      const feedText = list[0]!.feedText.slice(0, 80);
+      lines.push(`动态「${feedText}」（tid=${tid}）：`);
+      for (const c of list) {
+        lines.push(`  ${c.name || '某人'} 评论：「${c.content}」`);
+      }
+    }
+
+    const text = `QQ空间有 ${comments.length} 条新评论：\n${lines.join('\n')}\n请用 qq_qzone(action=reply, tid=对应动态的tid, content=你的回复) 逐条回复。`;
+
+    // meta 里带结构化的评论列表，方便主模型程序化处理
+    const commentList = comments.map((c) => ({
+      tid: c.feedTid,
+      commentId: c.commentId,
+      operatorNick: c.name,
+      operatorUin: c.uin,
+      original: c.content,
+      feedText: c.feedText.slice(0, 200),
+    }));
+
+    // senderKey 用第一条评论的 tid（事件归属到哪个会话由框架处理）
+    const firstTid = comments[0]!.feedTid;
 
     void this.host.pushEvent({
       type: 'qq.qzone.comment',
-      senderKey: `qzone:${c.feedTid}`,
+      senderKey: `qzone:${firstTid}`,
       text,
       meta: {
-        conv: `qzone:${c.feedTid}`,
-        tid: c.feedTid,
-        commentId: c.commentId,
-        operatorNick: c.name,
-        operatorUin: c.uin,
-        original: c.content,
-        feedText: c.feedText.slice(0, 200),
+        conv: `qzone:${firstTid}`,
+        comments: commentList,
+        count: comments.length,
       },
     });
 
-    this.host.log.info('notified comment', { tid: c.feedTid, commentId: c.commentId, name: c.name });
+    this.host.log.info('notified comments', { count: comments.length, tids: [...byFeed.keys()] });
   }
 
   // ── 时间工具 ──────────────────────────────────────────────────────────

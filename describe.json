@@ -15,8 +15,8 @@
       {
         "type": "qq.qzone.comment",
         "description": {
-          "zh": "你的 QQ 空间动态下有新评论。请用 qq_qzone(action=reply, tid=事件meta里的tid, content=你的回复) 回复。评论原文、评论者、tid 都在事件 meta 里。",
-          "en": "A new comment appeared under your Qzone post. Reply with qq_qzone(action=reply, tid=from meta, content=your reply)."
+          "zh": "你的 QQ 空间动态下有新评论（可能多条）。事件 meta.comments 数组里每条含 tid/commentId/operatorNick/original/feedText。用 qq_qzone(action=reply, tid=对应动态的tid, content=你的回复) 逐条回复。",
+          "en": "New comments under your Qzone posts (possibly multiple). Each item in meta.comments has tid/commentId/operatorNick/original/feedText. Reply to each with qq_qzone(action=reply)."
         }
       }
     ],
