@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "name": "cortico-world-qzone-watcher",
+  "version": "0.1.0",
+  "describe": {
+    "tools": [],
+    "events": [
+      {
+        "type": "qzone-watcher.started",
+        "description": {
+          "zh": "QQ 空间评论监听已启动，开始定时轮询。",
+          "en": "Qzone comment watcher started polling."
+        }
+      },
+      {
+        "type": "qq.qzone.comment",
+        "description": {
+          "zh": "你的 QQ 空间动态下有新评论。请用 qq_qzone(action=reply, tid=事件meta里的tid, content=你的回复) 回复。评论原文、评论者、tid 都在事件 meta 里。",
+          "en": "A new comment appeared under your Qzone post. Reply with qq_qzone(action=reply, tid=from meta, content=your reply)."
+        }
+      }
+    ],
+    "prompts": [
+      {
+        "key": "worlds.qzone-watcher.envPrompt",
+        "title": "QQ空间评论监听 · 环境提示词",
+        "role": "envPrompt",
+        "content": "{{qzone-watcher.status}}\n\n收到 `qq.qzone.comment` 事件时，用 `qq_qzone(action=reply, tid=事件 meta 里的 tid, content=你的回复)` 回复评论。回复要自然、一句话，别客套。评论原文和评论者都在事件 meta 里。"
+      }
+    ]
+  },
+  "changelog": {
+    "0.1.0": "- 初始版本：定时轮询 SnowLuma qzone API，发现新评论后推事件给主模型。\n- 配合 cortico-world-qq-final 的 qq_qzone(action=reply) 工具实现评论自动回复。\n- 不提供工具，只推事件；回复内容由主模型决定。"
+  }
+}

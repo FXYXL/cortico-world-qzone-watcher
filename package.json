@@ -1,0 +1,16 @@
+{
+  "name": "cortico-world-qzone-watcher",
+  "version": "0.1.0",
+  "description": "QQ 空间评论监听 World：定时轮询 SnowLuma 的 qzone API，发现新评论后推事件给主模型，配合 qq-final 的 qq_qzone(action=reply) 实现评论自动回复。",
+  "type": "module",
+  "main": "./src/index.ts",
+  "license": "MIT",
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "label": "QQ空间评论",
+    "tags": ["im", "qq"],
+    "describe": "describe.json"
+  },
+  "dependencies": {}
+}
