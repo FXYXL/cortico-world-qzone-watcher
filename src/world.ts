@@ -20,7 +20,6 @@ import type {
   WorldHost,
   WorldLamp,
   WorldWebUiDecl,
-  WorldPanelDecl,
   PromptDocDecl,
 } from 'cortico/core/types.ts';
 import { nowIso } from 'cortico/core/util.ts';
@@ -108,21 +107,9 @@ export class QzoneWatcherWorld implements World {
       },
     ];
 
-    const panels: WorldPanelDecl[] = [
-      {
-        id: 'status',
-        title: '运行状态',
-        description: '轮询状态、今日推送、已记录评论数。',
-        getMethods: ['getStatus'],
-      },
-      {
-        id: 'config',
-        title: '配置',
-        description: 'HTTP 端点、轮询间隔、推送限额等。改完需重启 World 生效。',
-        getMethods: ['getConfig'],
-      },
-    ];
-
+    // 不定义自定义 panels——那些需要前端构建产物（dist/console.js）。
+    // 配置表单由 Cortico Core 根据 config ConfigGroup 自动生成，不需要构建产物。
+    // 运行状态通过 lamps + badges 展示。
     return {
       label: 'QQ空间评论监听',
       lamps,
@@ -132,8 +119,6 @@ export class QzoneWatcherWorld implements World {
         { label: '轮询间隔', value: `${this.cfg.pollIntervalSec}秒`, tone: 'plain' },
         { label: '每次检查', value: `${this.cfg.feedsPerPoll}条动态`, tone: 'plain' },
       ],
-      panels,
-      invoke: (panel, method, _args) => this.invokePanel(panel, method),
       promptDocs: [
         {
           key: 'worlds.qzone-watcher.envPrompt',
@@ -149,50 +134,6 @@ export class QzoneWatcherWorld implements World {
       config: [QZONE_WATCHER_CONFIG_GROUP],
     };
   }
-
-  /** 控制台面板方法分发。 */
-  private async invokePanel(panel: string, method: string): Promise<unknown> {
-    if (panel === 'status' && method === 'getStatus') return this.getRuntimeStatus();
-    if (panel === 'config' && method === 'getConfig') return this.getConfigSnapshot();
-    return null;
-  }
-
-  /** 控制台「运行状态」面板数据。 */
-  private getRuntimeStatus(): Record<string, unknown> {
-    return {
-      enabled: this.cfg.enabled,
-      running: !!this.timer,
-      httpUrl: this.cfg.httpUrl,
-      pollIntervalSec: this.cfg.pollIntervalSec,
-      feedsPerPoll: this.cfg.feedsPerPoll,
-      lastPollAt: this.lastPollAt
-        ? new Date(this.lastPollAt).toISOString()
-        : null,
-      lastPollResult: this.lastPollResult,
-      lastPollError: this.lastPollError || null,
-      lastNewCount: this.lastNewCount,
-      dailyCount: this.state.dailyCount,
-      dailyNotifyLimit: this.cfg.dailyNotifyLimit,
-      seenComments: this.state.seenComments.length,
-      lastNotifyAt: this.state.lastNotifyAt
-        ? new Date(this.state.lastNotifyAt).toISOString()
-        : null,
-      quietHours: `${this.cfg.quietFrom}:00 - ${this.cfg.quietTo}:00`,
-    };
-  }
-
-  /** 控制台「配置」面板数据。 */
-  private getConfigSnapshot(): Record<string, unknown> {
-    return {
-      enabled: this.cfg.enabled,
-      httpUrl: this.cfg.httpUrl,
-      token: this.cfg.token ? '(已设置)' : '(空)',
-      pollIntervalSec: this.cfg.pollIntervalSec,
-      feedsPerPoll: this.cfg.feedsPerPoll,
-      dailyNotifyLimit: this.cfg.dailyNotifyLimit,
-      notifyCooldownSec: this.cfg.notifyCooldownSec,
-      quietFrom: this.cfg.quietFrom,
-      quietTo: this.cfg.quietTo,
     };
   }
 
