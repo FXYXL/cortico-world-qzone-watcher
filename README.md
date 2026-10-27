@@ -1,10 +1,10 @@
 # cortico-world-qzone-watcher
 
-QQ 空间评论监听 World：定时轮询 SnowLuma 的 qzone API，发现新评论后推事件给主模型，配合 `cortico-world-qq-final` 的 `qq_qzone(action=reply)` 实现评论自动回复。
+QQ 空间评论监听 World：定时轮询 SnowLuma 的 qzone API，发现新评论后推事件给主模型，配合 [cortico-world-qq-final](https://github.com/hth768/cortico-world-qq-final#readme) 的 `qq_qzone(action=reply)` 实现评论自动回复。
 
 ## 为什么需要这个插件
 
-SnowLuma/NapCat 有 qzone 的 HTTP API（发说说、评论、拉动态），但**不推送 qzone 评论事件**。`cortico-world-qq-final` 的评论自动回复功能等待 `qq.message.comment.new` 事件，但 SnowLuma 永远不会发这个事件——自动回复就失效了。
+SnowLuma/NapCat 有 qzone 的 HTTP API（发说说、评论、拉动态），但**不推送 qzone 评论事件**。[cortico-world-qq-final](https://github.com/hth768/cortico-world-qq-final#readme) 的评论自动回复功能等待 `qq.message.comment.new` 事件，但 SnowLuma 永远不会发这个事件——自动回复就失效了。
 
 这个插件填补这个缺口：用**定时轮询**代替事件推送。
 
@@ -25,6 +25,8 @@ SnowLuma/NapCat 有 qzone 的 HTTP API（发说说、评论、拉动态），但
     │
     └─ 主模型收到事件 → 用 qq-final 的 qq_qzone(action=reply) 回复
 ```
+
+> 配套插件：[cortico-world-qq-final](https://github.com/hth768/cortico-world-qq-final#readme)
 
 ## 特性
 
@@ -55,13 +57,15 @@ SnowLuma/NapCat 有 qzone 的 HTTP API（发说说、评论、拉动态），但
 
 打开 SnowLuma 配置目录 `config/onebot_<QQ号>.json`，找到 `httpServers` 段里的 `accessToken` 字段，复制到插件配置的 `token` 里。
 
-## 依赖
+## 依赖与适配版本
 
-| 依赖 | 说明 |
-|---|---|
-| `cortico-world-qq-final` | 提供 `qq_qzone(action=reply)` 工具，主模型用它回复评论 |
-| SnowLuma / NapCat | 提供 `get_qzone_feeds` 和 `get_qzone_msg_detail` HTTP API |
-| Cortico Core | World API 6 |
+| 依赖 | 版本 | 说明 |
+|---|---|---|
+| [cortico-world-qq-final](https://github.com/hth768/cortico-world-qq-final#readme) | ≥ 0.6.x | 提供 `qq_qzone(action=reply)` 工具，主模型用它回复评论 |
+| SnowLuma | ≥ 1.14.x | 提供 `get_qzone_feeds` 和 `get_qzone_msg_detail` HTTP API |
+| Cortico Core | World API 6 | Cortico 0.2.7+ 的 World 装配契约 |
+
+> 本插件开发时参考的版本：cortico-world-qq-final 0.6.35、SnowLuma 1.14.22。其他版本未逐一测试，API 字段名如有差异可能需要微调 `qzone-poller.ts` 里的解析逻辑。
 
 ## 安装
 
