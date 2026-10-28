@@ -19,6 +19,8 @@ export interface QzoneWatcherConfig {
   feedsPerPoll: number;
   /** 每日推送上限（防止刷屏）。0=不限。默认 20。 */
   dailyNotifyLimit: number;
+  /** 每次推送最多包含几条评论。超出的留到下次推送；如果对应动态已滚出 feeds 就自然丢弃。默认 5。 */
+  maxRepliesPerPush: number;
   /** 两次推送之间最少隔多久（秒），避免一条动态下连续多条评论触发多次。默认 60。 */
   notifyCooldownSec: number;
   /** 静默时段：这个时间段内不推送评论通知（不影响轮询和去重）。默认 23~9。 */
@@ -33,6 +35,7 @@ export const QZONE_WATCHER_DEFAULTS: QzoneWatcherConfig = {
   pollIntervalSec: 180,
   feedsPerPoll: 5,
   dailyNotifyLimit: 20,
+  maxRepliesPerPush: 5,
   notifyCooldownSec: 60,
   quietFrom: 23,
   quietTo: 9,
@@ -89,7 +92,16 @@ export const QZONE_WATCHER_CONFIG_GROUP: ConfigGroup = {
         maximum: 100,
         'x-suffix': '条',
         'x-hot': true,
-        description: '一天最多推送几条评论通知，防止刷屏。0=不限。默认 20。',
+        description: '一天最多推送几批评论通知，防止刷屏。0=不限。默认 20。',
+      },
+      'worlds.qzone-watcher.maxRepliesPerPush': {
+        type: 'integer',
+        title: '每次推送评论数',
+        minimum: 1,
+        maximum: 50,
+        'x-suffix': '条',
+        'x-hot': true,
+        description: '一次推送最多包含几条评论。超出的留到下次；如果对应动态已滚出拉取范围就自然丢弃。默认 5。',
       },
       'worlds.qzone-watcher.notifyCooldownSec': {
         type: 'integer',

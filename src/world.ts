@@ -39,6 +39,8 @@ interface WatcherState {
   dailyCount: number;
   /** 上次推送的时间戳（毫秒）。 */
   lastNotifyAt: number;
+  /** 是否已完成初始化扫描（持久化，重启后不丢）。 */
+  initialized: boolean;
 }
 
 export interface QzoneWatcherWorldOptions {
@@ -57,8 +59,6 @@ export class QzoneWatcherWorld implements World {
   private poller: QzonePoller | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
-  /** 是否已完成初始化扫描（第一次只标记 seen 不推送）。 */
-  private initialized = false;
   /** bot 自己的 QQ 号，用于过滤自己的评论。 */
   private botUin: string = '';
   /** 上次轮询时间戳（毫秒），用于控制台显示。 */
@@ -165,8 +165,7 @@ export class QzoneWatcherWorld implements World {
 
   /** storage.clear() 的实现：清空状态文件。 */
   private async clearState(): Promise<string> {
-    this.state = { seenComments: [], day: '', dailyCount: 0, lastNotifyAt: 0 };
-    this.initialized = false;
+    this.state = { seenComments: [], day: '', dailyCount: 0, lastNotifyAt: 0, initialized: false };
     this.saveState();
     return '已清空监听状态。下次轮询将重新初始化扫描。';
   }
@@ -258,11 +257,11 @@ export class QzoneWatcherWorld implements World {
 
       // 第一次启动（初始化扫描）：把所有已有评论标记为 seen，但不推送。
       // 这样只有之后真正新来的评论才会触发通知。
-      if (!this.initialized) {
+      if (!this.state.initialized) {
         for (const c of allComments) {
           this.markSeen(c.commentId, c.feedTid, c.parentCommentId);
         }
-        this.initialized = true;
+        this.state.initialized = true;
         this.saveState();
         this.lastNewCount = 0;
         this.host.log.info('initial scan done', { seenComments: this.state.seenComments.length });
@@ -278,9 +277,15 @@ export class QzoneWatcherWorld implements World {
       // 按时间排序，旧的在前
       newComments.sort((a, b) => a.time - b.time);
 
-      // 合并推送：把所有新评论放进一条事件，主模型逐条回复
+      // 只推送前 N 条（maxRepliesPerPush），剩余的不标记 seen，下次轮询还会发现。
+      // 如果那些评论对应的动态已经滚出 feeds（不再被拉取到），它们就自然消失——不会再被推送。
+      const max = Math.max(1, this.cfg.maxRepliesPerPush);
+      const toPush = newComments.slice(0, max);
+      const deferred = newComments.length - toPush.length;
+
+      // 合并推送
       if (!this.canNotify()) return;
-      this.notifyComments(newComments);
+      this.notifyComments(toPush, deferred);
     } catch (e) {
       this.lastPollAt = Date.now();
       this.lastPollResult = 'error';
@@ -313,13 +318,17 @@ export class QzoneWatcherWorld implements World {
     return true;
   }
 
-  /** 合并推送多条新评论：一条事件带上所有评论，主模型逐条回复。 */
-  private notifyComments(comments: NewComment[]): void {
+  /**
+   * 合并推送多条新评论：一条事件带上所有评论，主模型逐条回复。
+   * 只推送传入的这些（已经被 maxRepliesPerPush 截断），剩余的 deferred 条不标记 seen，
+   * 下次轮询还会发现；如果对应动态已滚出 feeds，它们就自然消失。
+   */
+  private notifyComments(comments: NewComment[], deferred: number): void {
     if (!this.host || !comments.length) return;
     this.state.lastNotifyAt = Date.now();
     this.state.dailyCount += 1;
 
-    // 全部标记为 seen（不管主模型最终回不回，都不会再推第二次）
+    // 推送的标记为 seen（不管主模型最终回不回，都不会再推第二次）
     for (const c of comments) {
       this.markSeen(c.commentId, c.feedTid, c.parentCommentId);
     }
@@ -347,7 +356,11 @@ export class QzoneWatcherWorld implements World {
       }
     }
 
-    const text = `QQ空间有 ${comments.length} 条新评论：\n${lines.join('\n')}\n请用 qq_qzone(action=reply, tid=对应动态的tid, content=你的回复) 逐条回复。`;
+    let text = `QQ空间有 ${comments.length} 条新评论：\n${lines.join('\n')}`;
+    if (deferred > 0) {
+      text += `\n（还有 ${deferred} 条评论留到下次推送）`;
+    }
+    text += `\n请用 qq_qzone(action=reply, tid=对应动态的tid, content=你的回复) 逐条回复。`;
 
     // meta 里带结构化的评论列表，方便主模型程序化处理
     const commentList = comments.map((c) => ({
@@ -420,12 +433,13 @@ export class QzoneWatcherWorld implements World {
           day: typeof raw.day === 'string' ? raw.day : '',
           dailyCount: typeof raw.dailyCount === 'number' ? raw.dailyCount : 0,
           lastNotifyAt: typeof raw.lastNotifyAt === 'number' ? raw.lastNotifyAt : 0,
+          initialized: typeof raw.initialized === 'boolean' ? raw.initialized : false,
         };
       }
     } catch {
       // 加载失败不阻断启动，用空状态
     }
-    return { seenComments: [], day: '', dailyCount: 0, lastNotifyAt: 0 };
+    return { seenComments: [], day: '', dailyCount: 0, lastNotifyAt: 0, initialized: false };
   }
 
   private saveState(): void {
