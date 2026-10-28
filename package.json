@@ -5,6 +5,7 @@
   "type": "module",
   "main": "./src/index.ts",
   "license": "MIT",
+  "keywords": ["cortico-world", "qq", "qzone", "im"],
   "cortico": {
     "kind": "world",
     "api": 6,
