@@ -15,3 +15,7 @@
 - `operatorUin`：评论者 QQ 号
 - `original`：评论原文
 - `feedText`：动态正文（帮你判断上下文）
+- `parentCommentId`：父评论 id（空字符串=顶级评论，非空=楼中楼回复）
+- `isReply`：是否为楼中楼回复（true=回复了某条评论，false=直接评论动态）
+
+楼中楼回复（isReply=true）表示对方在你的评论下面回复了你，同样需要回复。

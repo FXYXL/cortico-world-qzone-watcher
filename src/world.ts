@@ -260,7 +260,7 @@ export class QzoneWatcherWorld implements World {
       // 这样只有之后真正新来的评论才会触发通知。
       if (!this.initialized) {
         for (const c of allComments) {
-          this.markSeen(c.commentId, c.feedTid);
+          this.markSeen(c.commentId, c.feedTid, c.parentCommentId);
         }
         this.initialized = true;
         this.saveState();
@@ -270,7 +270,7 @@ export class QzoneWatcherWorld implements World {
       }
 
       // 筛出未见过的新评论
-      const newComments = allComments.filter((c) => this.isNewComment(c.commentId, c.feedTid));
+      const newComments = allComments.filter((c) => this.isNewComment(c.commentId, c.feedTid, c.parentCommentId));
       this.lastNewCount = newComments.length;
 
       if (!newComments.length) return;
@@ -293,9 +293,11 @@ export class QzoneWatcherWorld implements World {
 
   // ── 推送 ──────────────────────────────────────────────────────────────
 
-  private isNewComment(commentId: string, tid: string): boolean {
-    // 用 tid:commentId 作为去重 key，因为不同动态下的 comment_id 可能重复（都是简单数字）
-    const key = `${tid}:${commentId}`;
+  private isNewComment(commentId: string, tid: string, parentCommentId: string): boolean {
+    // 去重 key：tid + parentCommentId + commentId
+    // 顶级评论的 parentCommentId 为空，楼中楼回复的 parentCommentId 指向父评论。
+    // 不加 parentCommentId 的话，楼中楼的 comment_id 可能和顶级评论重复。
+    const key = `${tid}:${parentCommentId}:${commentId}`;
     return !this.state.seenComments.includes(key);
   }
 
@@ -319,7 +321,7 @@ export class QzoneWatcherWorld implements World {
 
     // 全部标记为 seen（不管主模型最终回不回，都不会再推第二次）
     for (const c of comments) {
-      this.markSeen(c.commentId, c.feedTid);
+      this.markSeen(c.commentId, c.feedTid, c.parentCommentId);
     }
     this.saveState();
 
@@ -336,7 +338,12 @@ export class QzoneWatcherWorld implements World {
       const feedText = list[0]!.feedText.slice(0, 80);
       lines.push(`动态「${feedText}」（tid=${tid}）：`);
       for (const c of list) {
-        lines.push(`  ${c.name || '某人'} 评论：「${c.content}」`);
+        // 区分顶级评论和楼中楼回复
+        if (c.parentCommentId) {
+          lines.push(`  ${c.name || '某人'} 回复了评论：「${c.content}」`);
+        } else {
+          lines.push(`  ${c.name || '某人'} 评论：「${c.content}」`);
+        }
       }
     }
 
@@ -350,6 +357,8 @@ export class QzoneWatcherWorld implements World {
       operatorUin: c.uin,
       original: c.content,
       feedText: c.feedText.slice(0, 200),
+      parentCommentId: c.parentCommentId,
+      isReply: !!c.parentCommentId,
     }));
 
     // senderKey 用第一条评论的 tid（事件归属到哪个会话由框架处理）
@@ -428,8 +437,8 @@ export class QzoneWatcherWorld implements World {
     }
   }
 
-  private markSeen(commentId: string, tid: string): void {
-    const key = `${tid}:${commentId}`;
+  private markSeen(commentId: string, tid: string, parentCommentId: string): void {
+    const key = `${tid}:${parentCommentId}:${commentId}`;
     if (!this.state.seenComments.includes(key)) {
       this.state.seenComments.push(key);
     }

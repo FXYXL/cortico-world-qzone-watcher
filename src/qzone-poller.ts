@@ -17,6 +17,8 @@ export interface QzoneComment {
   name: string;
   content: string;
   time: number;
+  /** 楼中楼回复的父评论 id；顶级评论为空字符串。 */
+  parentCommentId: string;
 }
 
 /** 一条动态（只取轮询需要的字段）。 */
@@ -102,13 +104,43 @@ export class QzonePoller {
     const raw = await this.callApi('get_qzone_msg_detail', params);
     const d = (raw ?? {}) as { comments?: Array<Record<string, unknown>> };
     const comments = Array.isArray(d.comments) ? d.comments : [];
-    return comments.map((c) => ({
-      commentId: String(c.comment_id ?? c.commentId ?? ''),
-      uin: String(c.uin ?? ''),
-      name: String(c.name ?? '').trim(),
-      content: QzonePoller.humanizeAtMarks(String(c.content ?? '')),
-      time: Number(c.time ?? 0),
-    })).filter((c) => c.commentId);
+    return QzonePoller.flattenComments(comments);
+  }
+
+  /**
+   * 把 SnowLuma 返回的评论列表展平：
+   * 顶级评论 + 每条评论下的 replies（楼中楼）都提取出来，平铺到一个数组。
+   * 顶级评论的 parentCommentId 为空字符串，楼中楼回复的 parentCommentId 指向父评论。
+   */
+  private static flattenComments(list: Array<Record<string, unknown>>): QzoneComment[] {
+    const result: QzoneComment[] = [];
+    for (const c of list) {
+      const commentId = String(c.comment_id ?? c.commentId ?? '');
+      if (!commentId) continue;
+      result.push({
+        commentId,
+        uin: String(c.uin ?? ''),
+        name: String(c.name ?? '').trim(),
+        content: QzonePoller.humanizeAtMarks(String(c.content ?? '')),
+        time: Number(c.time ?? 0),
+        parentCommentId: '',
+      });
+      // 递归读取楼中楼回复
+      const replies = Array.isArray(c.replies) ? c.replies as Array<Record<string, unknown>> : [];
+      for (const r of replies) {
+        const replyId = String(r.comment_id ?? r.commentId ?? '');
+        if (!replyId) continue;
+        result.push({
+          commentId: replyId,
+          uin: String(r.uin ?? ''),
+          name: String(r.name ?? '').trim(),
+          content: QzonePoller.humanizeAtMarks(String(r.content ?? '')),
+          time: Number(r.time ?? 0),
+          parentCommentId: commentId,
+        });
+      }
+    }
+    return result;
   }
 
   /** HTML 片段转纯文本（供可读性）。 */
