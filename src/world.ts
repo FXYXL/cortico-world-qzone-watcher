@@ -57,16 +57,28 @@ export class QzoneWatcherWorld implements World {
   private readonly dataDir: string;
   private state: WatcherState;
   private poller: QzonePoller | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * 下一次轮询的定时器。用自调度 setTimeout 而不是固定 setInterval —— 这样「连接失败」时
+   * 可以按短间隔快速重试，而不是干等满一个完整轮询周期（默认 180s）才再试一次。
+   */
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private polling = false;
   /** bot 自己的 QQ 号，用于过滤自己的评论。 */
   private botUin: string = '';
+  /** bot 身份是否已拿到；没拿到就每次轮询都重试，SnowLuma 后启动也能补上。 */
+  private identityResolved = false;
   /** 上次轮询时间戳（毫秒），用于控制台显示。 */
   private lastPollAt: number = 0;
+  /** 下次轮询的计划时刻（毫秒），用于控制台显示重试倒计时。 */
+  private nextPollAt: number = 0;
   /** 上次轮询结果：'ok' | 'error' | null（还没跑过）。 */
   private lastPollResult: 'ok' | 'error' | null = null;
   /** 上次轮询的错误信息（如果有）。 */
   private lastPollError: string = '';
+  /** 连续失败次数：为 0 表示上轮成功，用来做断连后的指数退避。 */
+  private consecutiveErrors: number = 0;
+  /** stop() 后置位，阻止在途轮询再排下一次。 */
+  private stopped = false;
   /** 上次轮询发现的新评论数。 */
   private lastNewCount: number = 0;
 
@@ -81,9 +93,13 @@ export class QzoneWatcherWorld implements World {
 
   envPromptVars(): Record<string, string> | null {
     if (!this.cfg.enabled) return null;
-    const status = this.timer ? '运行中' : '已停止';
+    const running = !!this.pollTimer || this.polling;
+    const status = running ? '运行中' : '已停止';
+    const conn = this.lastPollResult === 'ok' ? 'SnowLuma 连接正常'
+      : this.lastPollResult === 'error' ? `SnowLuma 连接失败（${this.lastPollError}）`
+        : '尚未完成首次轮询';
     return {
-      'qzone-watcher.status': `QQ空间评论监听：${status}，每 ${this.cfg.pollIntervalSec} 秒轮询一次，今日已推送 ${this.state.dailyCount} 条。`,
+      'qzone-watcher.status': `QQ空间评论监听：${status}，${conn}，每 ${this.intervalSec()} 秒轮询一次，今日已推送 ${this.state.dailyCount} 条。`,
     };
   }
 
@@ -96,29 +112,42 @@ export class QzoneWatcherWorld implements World {
     const lamps: WorldLamp[] = [
       {
         label: '监听状态',
-        state: this.cfg.enabled ? (this.timer ? 'online' : 'loading') : 'offline',
-        hint: this.cfg.enabled
-          ? (this.timer ? '运行中' : '正在启动')
-          : '未启用',
+        state: !this.cfg.enabled ? 'offline'
+          : (this.pollTimer || this.polling) ? 'online'
+            : 'loading',
+        hint: !this.cfg.enabled
+          ? '未启用'
+          : (this.pollTimer || this.polling)
+            ? `运行中，每 ${this.intervalSec()} 秒轮询一次`
+            : '正在启动',
       },
       {
         label: 'API 连接',
-        state: this.lastPollResult === 'ok' ? 'online' : this.lastPollResult === 'error' ? 'offline' : 'loading',
+        state: this.lastPollResult === 'ok' ? 'online'
+          : this.lastPollResult === 'error' ? 'error'
+            : 'loading',
         hint: this.lastPollResult === 'ok'
-          ? 'SnowLuma HTTP 正常'
+          ? `SnowLuma HTTP 正常${this.lastPollAt ? `（上次 ${this.fmtTime(this.lastPollAt)}）` : ''}`
           : this.lastPollResult === 'error'
-            ? `连接失败：${this.lastPollError}`
+            ? `连接失败：${this.lastPollError}${this.retryHint()}`
             : '尚未轮询',
       },
     ];
 
-    // badges 只放静态配置值（webUi 调用时固定，不会动态刷新）。
-    // 动态数据通过 storage.stat() 实时展示（前端打开数据页时调用）。
+    // badges 在每次 webUi() 调用时重新计算（WebUI 每次请求都会调 webUi），
+    // 所以「连接」这一项可以跟着轮询结果变化；更细的运行数据仍在 storage.stat()。
     return {
       label: 'QQ空间评论监听',
       lamps,
       badges: [
-        { label: '轮询间隔', value: `${this.cfg.pollIntervalSec}秒`, tone: 'plain' },
+        {
+          label: '连接',
+          value: this.lastPollResult === 'ok' ? '正常'
+            : this.lastPollResult === 'error' ? '断开重试中'
+              : '等待首次轮询',
+          tone: this.lastPollResult === 'ok' ? 'on' : this.lastPollResult === 'error' ? 'off' : 'plain',
+        },
+        { label: '轮询间隔', value: `${this.intervalSec()}秒`, tone: 'plain' },
         { label: '每次检查', value: `${this.cfg.feedsPerPoll}条动态`, tone: 'plain' },
         { label: '每日上限', value: `${this.cfg.dailyNotifyLimit}条`, tone: 'plain' },
         { label: '静默时段', value: `${this.cfg.quietFrom}:00-${this.cfg.quietTo}:00`, tone: 'plain' },
@@ -152,15 +181,15 @@ export class QzoneWatcherWorld implements World {
 
   /** storage.stat() 的实现：返回实时运行状态。 */
   private storageStat(): string {
-    const lastPoll = this.lastPollAt
-      ? new Date(this.lastPollAt).toLocaleString('zh-CN', { timeZone: this.timezone })
-      : '尚未轮询';
+    const lastPoll = this.lastPollAt ? this.fmtTime(this.lastPollAt) : '尚未轮询';
     const lastResult = this.lastPollResult === 'ok'
       ? '正常'
       : this.lastPollResult === 'error'
-        ? `错误：${this.lastPollError}`
+        ? `错误：${this.lastPollError}${this.retryHint()}`
         : '未轮询';
-    return `今日推送 ${this.state.dailyCount}/${this.cfg.dailyNotifyLimit}，已记录评论 ${this.state.seenComments.length} 条，上次轮询：${lastPoll}（${lastResult}）`;
+    const identity = this.identityResolved ? `bot=${this.botUin}` : 'bot 身份未取得（每次轮询重试）';
+    return `今日推送 ${this.state.dailyCount}/${this.cfg.dailyNotifyLimit}，已记录评论 ${this.state.seenComments.length} 条，`
+      + `上次轮询：${lastPoll}（${lastResult}），${identity}`;
   }
 
   /** storage.clear() 的实现：清空状态文件。 */
@@ -172,6 +201,7 @@ export class QzoneWatcherWorld implements World {
 
   async start(host: WorldHost): Promise<void> {
     this.host = host;
+    this.stopped = false;
     if (!this.cfg.enabled) {
       host.log.info('disabled, skipping');
       return;
@@ -188,32 +218,71 @@ export class QzoneWatcherWorld implements World {
       log: host.log,
     });
 
-    // 获取 bot 自己的 QQ 号，用于过滤自己的评论
-    try {
-      const info = await this.poller.getLoginInfo();
-      this.botUin = info.uin;
-      host.log.info('bot identity', { uin: info.uin, nickname: info.nickname });
-    } catch (e) {
-      host.log.warn('获取 bot QQ 号失败，将无法过滤自己的评论', e);
-    }
+    // 关键：这里**不能**先 await 任何网络请求再建定时器。
+    // 旧实现是先 await getLoginInfo() 才 setInterval —— SnowLuma 没起来时这一步失败（或卡在
+    // 超时上），轮询循环就迟迟建不起来；之后 SnowLuma 开好了也没有人再去连，指示灯因此一直红着。
+    // 现在：定时器立即生效；bot 身份改在每次轮询里惰性获取，成功一次就记住。
+    host.log.info('started', { pollIntervalSec: this.intervalSec(), httpUrl: this.cfg.httpUrl });
 
-    const sec = Math.max(60, this.cfg.pollIntervalSec);
-    this.timer = setInterval(() => {
-      this.poll().catch((e) => host.log.error('poll error', e));
-    }, sec * 1000);
-
-    host.log.info('started', { pollIntervalSec: sec, httpUrl: this.cfg.httpUrl, botUin: this.botUin });
-
-    // 启动后立即跑一次，不等第一个 interval
-    this.poll().catch((e) => host.log.error('initial poll error', e));
+    // 启动后立即跑一次，不等第一个间隔
+    this.scheduleNext(0);
   }
 
   async stop(): Promise<void> {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
+    this.stopped = true;
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
     }
     this.host?.log.info('stopped');
+  }
+
+  // ── 轮询调度 ──────────────────────────────────────────────────────────
+
+  /** 正常轮询间隔（秒），下限 60。 */
+  private intervalSec(): number {
+    return Math.max(60, this.cfg.pollIntervalSec);
+  }
+
+  /**
+   * 下一次轮询的延迟：成功时按配置间隔；失败时快速重试。
+   * 连接被拒是本机调用，非常便宜，所以断连时用 15s 起、指数退避到最多 60s，
+   * 这样 SnowLuma 后启动时，指示灯几十秒内就能自己转绿，而不必等满一个 180s 周期。
+   */
+  private retryDelayMs(): number {
+    const base = this.intervalSec() * 1000;
+    if (this.lastPollResult === 'ok') return base;
+    const exp = Math.max(0, Math.min(this.consecutiveErrors - 1, 2));
+    return Math.min(base, 15000 * 2 ** exp);
+  }
+
+  /** 排下一次轮询（自调度，替代固定 setInterval）。 */
+  private scheduleNext(delayMs: number): void {
+    if (this.stopped || !this.host) return;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    const delay = Math.max(0, delayMs);
+    this.nextPollAt = Date.now() + delay;
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      void this.poll().catch((e) => this.host?.log.error('poll error', e));
+    }, delay);
+    this.pollTimer.unref?.();
+  }
+
+  /** 控制台显示用的本地时间。 */
+  private fmtTime(ts: number): string {
+    try {
+      return new Date(ts).toLocaleString('zh-CN', { timeZone: this.timezone });
+    } catch {
+      return new Date(ts).toLocaleString('zh-CN');
+    }
+  }
+
+  /** 连接失败时给指示灯的补充说明（含重试倒计时）。 */
+  private retryHint(): string {
+    if (!this.nextPollAt) return '';
+    const sec = Math.max(1, Math.round((this.nextPollAt - Date.now()) / 1000));
+    return `；约 ${sec} 秒后自动重试`;
   }
 
   // ── 轮询 ──────────────────────────────────────────────────────────────
@@ -221,9 +290,26 @@ export class QzoneWatcherWorld implements World {
   private async poll(): Promise<void> {
     if (this.polling) return; // 上一次还没跑完，跳过
     if (!this.poller || !this.host) return;
+    const host = this.host;
+    const poller = this.poller;
     this.polling = true;
     try {
-      const feeds = await this.poller.getFeeds();
+      // bot 身份惰性获取：只成功一次就记住，失败不阻断本次轮询，下次再试。
+      // 这样 SnowLuma 后启动时也能补上身份，不会永远过滤不了自己的评论。
+      if (!this.identityResolved) {
+        try {
+          const info = await poller.getLoginInfo();
+          if (info.uin) {
+            this.botUin = info.uin;
+            this.identityResolved = true;
+            host.log.info('bot identity', { uin: info.uin, nickname: info.nickname });
+          }
+        } catch (e) {
+          host.log.debug(`获取 bot QQ 号失败，下次轮询重试：${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      const feeds = await poller.getFeeds();
       this.lastPollAt = Date.now();
       this.lastPollResult = 'ok';
       this.lastPollError = '';
@@ -293,6 +379,9 @@ export class QzoneWatcherWorld implements World {
       this.host.log.error('poll failed', e);
     } finally {
       this.polling = false;
+      // 结果决定下一次的间隔：成功走正常周期，失败走快速重试（见 retryDelayMs）。
+      this.consecutiveErrors = this.lastPollResult === 'ok' ? 0 : this.consecutiveErrors + 1;
+      this.scheduleNext(this.retryDelayMs());
     }
   }
 

@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.tgz
 .DS_Store
+# 凭据文件绝不入库（发布用的 npm token 只写到用户主目录或临时，用完即删）
+.npmrc
+.env
